@@ -1,3 +1,4 @@
+// index.js
 import express from "express";
 import { chromium } from "playwright";
 
@@ -9,6 +10,7 @@ app.use(express.json({ limit: "100mb" }));
 
 let browser;
 
+/** Reutiliza el navegador (más rápido y estable) */
 async function getBrowser() {
   if (!browser) {
     browser = await chromium.launch({
@@ -19,16 +21,17 @@ async function getBrowser() {
   return browser;
 }
 
+/** Health check */
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+/** Render HTML -> PDF (base64) */
 app.post("/render", async (req, res) => {
   const t0 = Date.now();
-  let context;
-  let page;
 
   try {
+    // Seguridad por secret compartido
     const authHeader = req.get("X-Render-Secret");
     if (!RENDER_SECRET || authHeader !== RENDER_SECRET) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -38,26 +41,26 @@ app.post("/render", async (req, res) => {
     if (!html) return res.status(400).json({ error: "HTML is required" });
 
     const b = await getBrowser();
-    context = await b.newContext();
-    page = await context.newPage();
+    const context = await b.newContext();
+    const page = await context.newPage();
 
-    // Evita renders eternos
-    page.setDefaultTimeout(15000);
-    page.setDefaultNavigationTimeout(15000);
-
+    // Cargar HTML (sin dependencias externas recomendado)
     await page.setContent(html, { waitUntil: "load" });
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(200);
 
     const pdfBuffer = await page.pdf({
       width: `${widthMm}mm`,
       height: `${heightMm}mm`,
       margin: { top: "0mm", right: "0mm", bottom: "0mm", left: "0mm" },
       printBackground: true,
-      // Si ya pasas width/height, esto puede estorbar según CSS; mejor dejarlo en false.
-      preferCSSPageSize: false,
+      preferCSSPageSize: true,
     });
 
-    res.json({
+    // Limpieza correcta (evita fugas)
+    await page.close();
+    await context.close();
+
+    return res.json({
       success: true,
       pdf: pdfBuffer.toString("base64"),
       size: pdfBuffer.length,
@@ -65,30 +68,28 @@ app.post("/render", async (req, res) => {
     });
   } catch (error) {
     console.error("Render error:", error);
-    res.status(500).json({
+
+    return res.status(500).json({
       error: "Render failed",
       message: error?.message || String(error),
       renderMs: Date.now() - t0,
     });
-  } finally {
-    try {
-      if (page) await page.close();
-    } catch {}
-    try {
-      if (context) await context.close();
-    } catch {}
   }
 });
 
-// cierre limpio
-process.on("SIGTERM", async () => {
+// Cierre limpio (Railway manda SIGTERM en redeploy)
+async function shutdown() {
   try {
     if (browser) await browser.close();
   } catch {}
   process.exit(0);
-});
+}
 
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`Render service listening on port ${PORT}`)
-);
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+// IMPORTANTE: escuchar en 0.0.0.0 para contenedores
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Render service listening on port ${PORT}`);
+});
 
