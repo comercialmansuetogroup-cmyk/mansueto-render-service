@@ -25,6 +25,9 @@ app.get("/health", (req, res) => {
 
 app.post("/render", async (req, res) => {
   const t0 = Date.now();
+  let context;
+  let page;
+
   try {
     const authHeader = req.get("X-Render-Secret");
     if (!RENDER_SECRET || authHeader !== RENDER_SECRET) {
@@ -35,42 +38,57 @@ app.post("/render", async (req, res) => {
     if (!html) return res.status(400).json({ error: "HTML is required" });
 
     const b = await getBrowser();
-    const context = await b.newContext();
-    const page = await context.newPage();
+    context = await b.newContext();
+    page = await context.newPage();
+
+    // Evita renders eternos
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(15000);
 
     await page.setContent(html, { waitUntil: "load" });
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(100);
 
     const pdfBuffer = await page.pdf({
       width: `${widthMm}mm`,
       height: `${heightMm}mm`,
       margin: { top: "0mm", right: "0mm", bottom: "0mm", left: "0mm" },
       printBackground: true,
-      preferCSSPageSize: true
+      // Si ya pasas width/height, esto puede estorbar según CSS; mejor dejarlo en false.
+      preferCSSPageSize: false,
     });
-
-    await context.close();
 
     res.json({
       success: true,
       pdf: pdfBuffer.toString("base64"),
       size: pdfBuffer.length,
-      renderMs: Date.now() - t0
+      renderMs: Date.now() - t0,
     });
   } catch (error) {
     console.error("Render error:", error);
     res.status(500).json({
       error: "Render failed",
       message: error?.message || String(error),
-      renderMs: Date.now() - t0
+      renderMs: Date.now() - t0,
     });
+  } finally {
+    try {
+      if (page) await page.close();
+    } catch {}
+    try {
+      if (context) await context.close();
+    } catch {}
   }
 });
 
 // cierre limpio
 process.on("SIGTERM", async () => {
-  try { if (browser) await browser.close(); } catch {}
+  try {
+    if (browser) await browser.close();
+  } catch {}
   process.exit(0);
 });
 
-app.listen(PORT, () => console.log(`Render service listening on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`Render service listening on port ${PORT}`)
+);
+
